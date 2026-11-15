@@ -14,27 +14,32 @@ from model.transformer import MyLLM
 
 app = Flask(__name__)
 
-# Global model state
 model = None
 tokenizer = None
 device = None
 block_size = 128
+loaded_checkpoint = ""
 
 
 def load_model(checkpoint_path: str, tokenizer_path: str):
-    global model, tokenizer, device, block_size
+    global model, tokenizer, device, block_size, loaded_checkpoint
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading model on {device}...")
 
     ckpt = Path(checkpoint_path)
     if not ckpt.exists():
-        fallback = ROOT / "checkpoints" / "best_model.pt"
-        if fallback.exists():
-            ckpt = fallback
-        else:
-            raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+        # Fallbacks: sft_best.pt -> pretrained_best.pt -> best_model.pt
+        for candidate in [ROOT / "checkpoints" / "sft_best.pt", ROOT / "checkpoints" / "pretrained_best.pt", ROOT / "checkpoints" / "best_model.pt"]:
+            if candidate.exists():
+                ckpt = candidate
+                break
 
+    if not ckpt.exists():
+        raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
+
+    loaded_checkpoint = ckpt.name
+    print(f"Loading weights from: {ckpt}")
     checkpoint = torch.load(ckpt, map_location=device, weights_only=False)
 
     config = checkpoint.get("config", {})
@@ -66,7 +71,7 @@ def load_model(checkpoint_path: str, tokenizer_path: str):
     state_dict = checkpoint.get("model_state_dict", checkpoint)
     model.load_state_dict(state_dict)
     model.eval()
-    print("Model loaded successfully!")
+    print(f"Model ({loaded_checkpoint}) loaded successfully!")
 
 
 HTML_TEMPLATE = """
@@ -122,6 +127,14 @@ HTML_TEMPLATE = """
       border-radius: 50%;
       display: inline-block;
       box-shadow: 0 0 8px #10b981;
+    }
+    .ckpt-tag {
+      font-size: 0.75rem;
+      background: #334155;
+      padding: 2px 8px;
+      border-radius: 4px;
+      color: #38bdf8;
+      font-family: monospace;
     }
     .controls {
       display: flex;
@@ -230,7 +243,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <header>
-    <h1><span class="badge"></span> MyLLM Chat</h1>
+    <h1><span class="badge"></span> MyLLM Chat <span class="ckpt-tag" id="ckpt-label">Loading...</span></h1>
     <div class="controls">
       <label>
         Temp: <span id="temp-val">0.7</span>
@@ -246,7 +259,7 @@ HTML_TEMPLATE = """
   <div id="chat-container">
     <div class="message bot">
       <div class="role-label">MyLLM</div>
-      Hello! I am your custom-trained LLM. Ask me anything or type a prompt to get started!
+      Hello! I am your custom-trained chatbot. Ask me a question or type a message!
     </div>
   </div>
 
@@ -262,6 +275,10 @@ HTML_TEMPLATE = """
     const userInput = document.getElementById("user-input");
     const sendBtn = document.getElementById("send-btn");
 
+    fetch("/api/info").then(r => r.json()).then(d => {
+      document.getElementById("ckpt-label").innerText = d.checkpoint || "online";
+    });
+
     function scrollToBottom() {
       chatContainer.scrollTop = chatContainer.scrollHeight;
     }
@@ -271,7 +288,6 @@ HTML_TEMPLATE = """
       const text = userInput.value.trim();
       if (!text) return;
 
-      // Add user message
       const userDiv = document.createElement("div");
       userDiv.className = "message user";
       userDiv.innerHTML = `<div class="role-label">You</div>${escapeHtml(text)}`;
@@ -279,7 +295,6 @@ HTML_TEMPLATE = """
       userInput.value = "";
       sendBtn.disabled = true;
 
-      // Add temporary bot thinking message
       const botDiv = document.createElement("div");
       botDiv.className = "message bot typing";
       botDiv.innerHTML = `<div class="role-label">MyLLM</div>Thinking...`;
@@ -323,18 +338,34 @@ def index():
     return render_template_string(HTML_TEMPLATE)
 
 
+@app.route("/api/info")
+def api_info():
+    return jsonify({"checkpoint": loaded_checkpoint, "device": str(device)})
+
+
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     data = request.json or {}
-    prompt = data.get("prompt", "")
+    user_prompt = data.get("prompt", "").strip()
     max_tokens = int(data.get("max_tokens", 80))
     temperature = float(data.get("temperature", 0.7))
     top_k = int(data.get("top_k", 40))
 
-    if not prompt:
+    if not user_prompt:
         return jsonify({"response": ""})
 
-    prompt_ids = tokenizer.encode(prompt).ids
+    bos_id = tokenizer.token_to_id("[BOS]")
+    eos_id = tokenizer.token_to_id("[EOS]")
+    user_id = tokenizer.token_to_id("[USER]")
+    assistant_id = tokenizer.token_to_id("[ASSISTANT]")
+
+    # Check if instruction tokens exist
+    if None not in (bos_id, user_id, assistant_id):
+        # Format as prompt: [BOS] [USER] <prompt> [ASSISTANT]
+        prompt_ids = [bos_id, user_id] + tokenizer.encode(user_prompt, add_special_tokens=False).ids + [assistant_id]
+    else:
+        prompt_ids = tokenizer.encode(user_prompt).ids
+
     if not prompt_ids:
         prompt_ids = [0]
 
@@ -355,21 +386,25 @@ def api_generate():
             next_token = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, next_token), dim=1)
 
-            # Optional early break on EOS
-            eos_id = tokenizer.token_to_id("[EOS]")
-            if eos_id is not None and next_token.item() == eos_id:
+            # Stop on EOS or next [USER] tag
+            tok_id = next_token.item()
+            if tok_id == eos_id or tok_id == user_id:
                 break
 
-    # Decode newly generated tokens only
+    # Decode assistant tokens only
     new_tokens = idx[0][len(prompt_ids):].tolist()
     generated_text = tokenizer.decode(new_tokens)
+
+    # Clean up any trailing special tokens
+    for stop_word in ["[EOS]", "[USER]", "[ASSISTANT]"]:
+        generated_text = generated_text.replace(stop_word, "")
 
     return jsonify({"response": generated_text.strip()})
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints/pretrained_best.pt")
+    parser.add_argument("--checkpoint", type=str, default="checkpoints/sft_best.pt")
     parser.add_argument("--tokenizer", type=str, default="data/tokenizer/tokenizer_combined.json")
     parser.add_argument("--port", type=int, default=5000)
     args = parser.parse_args()
