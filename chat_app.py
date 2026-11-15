@@ -29,7 +29,6 @@ def load_model(checkpoint_path: str, tokenizer_path: str):
 
     ckpt = Path(checkpoint_path)
     if not ckpt.exists():
-        # Fallbacks: sft_best.pt -> pretrained_best.pt -> best_model.pt
         for candidate in [ROOT / "checkpoints" / "sft_best.pt", ROOT / "checkpoints" / "pretrained_best.pt", ROOT / "checkpoints" / "best_model.pt"]:
             if candidate.exists():
                 ckpt = candidate
@@ -91,11 +90,7 @@ HTML_TEMPLATE = """
       --text: #f8fafc;
       --text-muted: #94a3b8;
     }
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background: var(--bg);
@@ -148,9 +143,7 @@ HTML_TEMPLATE = """
       align-items: center;
       gap: 6px;
     }
-    .controls input[type="range"] {
-      width: 80px;
-    }
+    .controls input[type="range"] { width: 75px; }
     #chat-container {
       flex: 1;
       overflow-y: auto;
@@ -214,9 +207,7 @@ HTML_TEMPLATE = """
       outline: none;
       transition: border-color 0.2s;
     }
-    #user-input:focus {
-      border-color: #3b82f6;
-    }
+    #user-input:focus { border-color: #3b82f6; }
     button {
       background: #3b82f6;
       border: none;
@@ -228,17 +219,9 @@ HTML_TEMPLATE = """
       cursor: pointer;
       transition: background 0.2s;
     }
-    button:hover {
-      background: #2563eb;
-    }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-    .typing {
-      font-style: italic;
-      color: var(--text-muted);
-    }
+    button:hover { background: #2563eb; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .typing { font-style: italic; color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -247,11 +230,15 @@ HTML_TEMPLATE = """
     <div class="controls">
       <label>
         Temp: <span id="temp-val">0.7</span>
-        <input type="range" id="temp" min="0.1" max="1.5" step="0.1" value="0.7" oninput="document.getElementById('temp-val').innerText = this.value">
+        <input type="range" id="temp" min="0.2" max="1.2" step="0.05" value="0.7" oninput="document.getElementById('temp-val').innerText = this.value">
       </label>
       <label>
-        Tokens: <span id="tokens-val">80</span>
-        <input type="range" id="tokens" min="20" max="200" step="10" value="80" oninput="document.getElementById('tokens-val').innerText = this.value">
+        Rep. Penalty: <span id="rep-val">1.25</span>
+        <input type="range" id="rep" min="1.0" max="2.0" step="0.05" value="1.25" oninput="document.getElementById('rep-val').innerText = this.value">
+      </label>
+      <label>
+        Tokens: <span id="tokens-val">60</span>
+        <input type="range" id="tokens" min="20" max="120" step="10" value="60" oninput="document.getElementById('tokens-val').innerText = this.value">
       </label>
     </div>
   </header>
@@ -259,13 +246,16 @@ HTML_TEMPLATE = """
   <div id="chat-container">
     <div class="message bot">
       <div class="role-label">MyLLM</div>
-      Hello! I am your custom-trained chatbot. Ask me a question or type a message!
+      Hello! Ask me questions like:
+      <br>&bull; <i>Why is the sky blue?</i>
+      <br>&bull; <i>How do trees help the environment?</i>
+      <br>&bull; <i>What is photosynthesis?</i>
     </div>
   </div>
 
   <div id="input-container">
     <form id="chat-form" onsubmit="sendMessage(event)">
-      <input type="text" id="user-input" placeholder="Type a message..." autocomplete="off" autofocus />
+      <input type="text" id="user-input" placeholder="Ask a question..." autocomplete="off" autofocus />
       <button type="submit" id="send-btn">Send</button>
     </form>
   </div>
@@ -303,20 +293,21 @@ HTML_TEMPLATE = """
 
       try {
         const temperature = parseFloat(document.getElementById("temp").value);
+        const repPenalty = parseFloat(document.getElementById("rep").value);
         const maxTokens = parseInt(document.getElementById("tokens").value);
 
         const res = await fetch("/api/generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: text, temperature: temperature, max_tokens: maxTokens })
+          body: JSON.stringify({ prompt: text, temperature: temperature, rep_penalty: repPenalty, max_tokens: maxTokens })
         });
         const data = await res.json();
 
         botDiv.className = "message bot";
-        botDiv.innerHTML = `<div class="role-label">MyLLM</div>${escapeHtml(data.response || "No response generated.")}`;
+        botDiv.innerHTML = `<div class="role-label">MyLLM</div>${escapeHtml(data.response || "...")}`;
       } catch (err) {
         botDiv.className = "message bot";
-        botDiv.innerHTML = `<div class="role-label">Error</div>Failed to connect to model: ${err.message}`;
+        botDiv.innerHTML = `<div class="role-label">Error</div>${err.message}`;
       } finally {
         sendBtn.disabled = false;
         userInput.focus();
@@ -347,8 +338,9 @@ def api_info():
 def api_generate():
     data = request.json or {}
     user_prompt = data.get("prompt", "").strip()
-    max_tokens = int(data.get("max_tokens", 80))
+    max_tokens = int(data.get("max_tokens", 60))
     temperature = float(data.get("temperature", 0.7))
+    rep_penalty = float(data.get("rep_penalty", 1.25))
     top_k = int(data.get("top_k", 40))
 
     if not user_prompt:
@@ -359,9 +351,7 @@ def api_generate():
     user_id = tokenizer.token_to_id("[USER]")
     assistant_id = tokenizer.token_to_id("[ASSISTANT]")
 
-    # Check if instruction tokens exist
     if None not in (bos_id, user_id, assistant_id):
-        # Format as prompt: [BOS] [USER] <prompt> [ASSISTANT]
         prompt_ids = [bos_id, user_id] + tokenizer.encode(user_prompt, add_special_tokens=False).ids + [assistant_id]
     else:
         prompt_ids = tokenizer.encode(user_prompt).ids
@@ -378,6 +368,16 @@ def api_generate():
             logits, _ = model(idx_cond)
             logits = logits[:, -1, :] / max(temperature, 1e-5)
 
+            # Repetition penalty
+            if rep_penalty != 1.0:
+                seen_tokens = set(idx[0].tolist())
+                for tok in seen_tokens:
+                    if logits[0, tok] > 0:
+                        logits[0, tok] /= rep_penalty
+                    else:
+                        logits[0, tok] *= rep_penalty
+
+            # Top-k filtering
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float("Inf")
@@ -386,17 +386,14 @@ def api_generate():
             next_token = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, next_token), dim=1)
 
-            # Stop on EOS or next [USER] tag
             tok_id = next_token.item()
-            if tok_id == eos_id or tok_id == user_id:
+            if tok_id in (eos_id, user_id):
                 break
 
-    # Decode assistant tokens only
     new_tokens = idx[0][len(prompt_ids):].tolist()
     generated_text = tokenizer.decode(new_tokens)
 
-    # Clean up any trailing special tokens
-    for stop_word in ["[EOS]", "[USER]", "[ASSISTANT]"]:
+    for stop_word in ["[EOS]", "[USER]", "[ASSISTANT]", "[PAD]"]:
         generated_text = generated_text.replace(stop_word, "")
 
     return jsonify({"response": generated_text.strip()})
