@@ -1,0 +1,29 @@
+# Git Ignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# Data & cache exclusions (large files)
+data/hf_cache/
+data/pretraining/*.bin
+data/processed/*.pt
+data/*.sqlite
+custom-llm/data/*.sqlite
+data/raw/
+*.bin
+*.tar.gz
+*.zip
+
+# Checkpoints (too large for git)
+checkpoints/*.pt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Ignore large raw/processed json/jsonl datasets
+data/*.jsonl
+data/processed/*.jsonl
+data/conversations-000/*.json
